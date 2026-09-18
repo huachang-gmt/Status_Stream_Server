@@ -1,0 +1,36 @@
+# STM32 / CubeIDE
+
+Debug/
+Release/
+*.launch
+.metadata/
+.settings/
+.cproject
+.project
+
+# Build output
+
+build/
+cmake-build-*/
+out/
+
+# Generated / temporary files
+
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# IDE temporary files
+
+.vscode/
+.idea/
+
+# OS temporary files
+
+.DS_Store
+Thumbs.db
+desktop.ini
