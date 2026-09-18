@@ -305,3 +305,609 @@ STATUS_TEST
 ...
 ```
 ---
+# [2026-09-18] 更新版本
+
+# STM32H755 Status Stream TCP Server — Validation Version
+
+## 1. 本階段目的
+
+本階段的目的，是先在 STM32H755 端完成並驗證 Status Stream 的基本資料流程：
+
+```text
+68-byte Raw Status Data
+        ↓
+StatusTCPServer_BuildPayload()
+        ↓
+139-byte Status Payload
+        ↓
+TCP Server
+        ↓
+TCP Client
+```
+
+本階段使用五組固定的 Sample Data 進行 Validation。
+
+目的不是完成最終正式版本，而是先確認：
+
+* 68-byte Raw Data 可以正確轉換成 139-byte Payload
+* Payload 格式正確
+* 五組 Sample 可以依序循環
+* STM32 TCP Server 可以正常傳送 Payload
+* PC TCP Client 可以正確收到完整的 139-byte Payload
+* STM32 端 `printf` 與 PC 端接收資料可以互相對應
+
+本階段完成並確認無誤後，才進入下一階段的 151-byte Status Transport Packet 開發。
+
+---
+
+# 2. Validation Version 的資料格式
+
+## 2.1 Raw Data
+
+每組 Sample：
+
+```text
+68 bytes
+```
+
+目前共有：
+
+```text
+Sample 0
+Sample 1
+Sample 2
+Sample 3
+Sample 4
+```
+
+---
+
+## 2.2 Status Payload
+
+Raw Data 會經過：
+
+```text
+68-byte Raw Data
+        ↓
+136-byte ASCII HEX
+        ↓
+'>' + 136-byte HEX + "\r\n"
+        ↓
+139-byte Payload
+```
+
+因此 Payload 固定為：
+
+```text
+139 bytes
+```
+
+格式：
+
+```text
+> + 136 ASCII HEX characters + CRLF
+```
+
+也就是：
+
+```text
+Byte 0       : '>'
+Byte 1~136   : ASCII HEX
+Byte 137     : '\r'
+Byte 138     : '\n'
+```
+
+---
+
+# 3. Validation Version 的 Sample
+
+目前使用五組固定 Sample Data：
+
+| Sample | Controller Status |  X |  Y |  Z | RX | RY | RZ |
+| ------ | ----------------: | -: | -: | -: | -: | -: | -: |
+| 0      |        0x00000003 |  0 |  0 |  0 |  0 |  0 |  0 |
+| 1      |        0x0000000B | 10 | 20 | 30 |  1 |  2 |  3 |
+| 2      |        0x00000013 | 20 | 10 |  5 |  2 |  4 |  6 |
+| 3      |        0x0000002B | 30 | 15 | 10 |  3 |  6 |  9 |
+| 4      |        0x00000023 | 40 | 20 | 15 |  4 |  8 | 12 |
+
+這五組資料刻意使用不同的 Controller Status、Analog Input 與 Position 數值，方便在 PC Client 上確認資料確實有變化。
+
+---
+
+# 4. Sample 循環條件
+
+Validation Version 的 Sample 順序固定為：
+
+```text
+Sample 0
+   ↓
+Sample 1
+   ↓
+Sample 2
+   ↓
+Sample 3
+   ↓
+Sample 4
+   ↓
+Sample 0
+   ↓
+...
+```
+
+目前 Validation Version 的傳送週期設定為：
+
+```c
+#define STATUS_TCP_PERIOD_MS 1000U
+```
+
+也就是每：
+
+```text
+1000 ms = 1 second
+```
+
+切換一次 Sample。
+
+### 為什麼不是正式的 200ms？
+
+這是刻意的 Validation 設定。
+
+1000ms 可以讓工程師在 STM32 `printf` Console 與 PC Client 上清楚看到：
+
+```text
+0 → 1 → 2 → 3 → 4 → 0
+```
+
+正式版本完成後會恢復：
+
+```c
+#define STATUS_TCP_PERIOD_MS 200U
+```
+
+---
+
+# 5. 五組測試條件
+
+本階段使用以下五組 Sample 作為固定 Regression Test。
+
+## Test 0 — Sample 0
+
+Expected Payload 開頭：
+
+```text
+>0000000340000000199A
+```
+
+確認：
+
+* Sample 0 可以正常建立
+* Controller Status 正確
+* Analog Input 資料正確
+* Position 全部為 0
+* Payload 開頭為 `>`
+* Payload 長度為 139 bytes
+
+---
+
+## Test 1 — Sample 1
+
+Expected Payload 開頭：
+
+```text
+>0000000B600000003333
+```
+
+確認：
+
+* Sample 1 可以正常建立
+* Controller Status 發生變化
+* Analog Input 資料正確
+* Position 數值開始變化
+* Payload 與 Sample 0 不相同
+
+---
+
+## Test 2 — Sample 2
+
+Expected Payload 開頭：
+
+```text
+>00000013800000004CCC
+```
+
+確認：
+
+* Sample 2 可以正常建立
+* Controller Status 正確
+* Analog Input 資料正確
+* X/Y/Z 與 Rotation 數值持續變化
+
+---
+
+## Test 3 — Sample 3
+
+Expected Payload 開頭：
+
+```text
+>0000002BBFFF00006666
+```
+
+確認：
+
+* Sample 3 可以正常建立
+* Controller Status 正確
+* Analog Input 資料正確
+* Position 資料正確
+
+---
+
+## Test 4 — Sample 4
+
+Expected Payload 開頭：
+
+```text
+>00000023E66600008000
+```
+
+確認：
+
+* Sample 4 可以正常建立
+* Controller Status 正確
+* Analog Input 資料正確
+* Position 資料正確
+* 五組 Sample 的最後一組可以正常傳送
+
+完成 Test 4 後，下一次必須重新回到：
+
+```text
+Sample 0
+```
+
+以確認循環功能正常。
+
+---
+
+# 6. STM32 端 printf Validation
+
+STM32 端會輸出以下資訊：
+
+```text
+[STATUS] Sample 0 BuildPayload OK
+[STATUS] Payload[0..20]: >0000000340000000199A
+[STATUS] Sample 0 TCP send OK, 139 bytes
+```
+
+這三行代表：
+
+### BuildPayload OK
+
+```text
+[STATUS] Sample 0 BuildPayload OK
+```
+
+表示：
+
+```text
+status_raw_data_buffers[0]
+        ↓
+StatusTCPServer_BuildPayload()
+        ↓
+status_payload_buffers[0]
+```
+
+建立成功。
+
+---
+
+### Payload[0..20]
+
+例如：
+
+```text
+[STATUS] Payload[0..20]: >0000000340000000199A
+```
+
+表示 STM32 目前建立出的 Payload 前 21 bytes。
+
+主要用來快速確認：
+
+* `>` 是否存在
+* HEX Conversion 是否正確
+* Sample 是否正確
+
+---
+
+### TCP send OK
+
+例如：
+
+```text
+[STATUS] Sample 0 TCP send OK, 139 bytes
+```
+
+表示：
+
+```text
+tcp_write()
+```
+
+成功接受這一筆 139-byte Payload。
+
+---
+
+# 7. TCP write FAILED 的意義
+
+如果看到：
+
+```text
+[STATUS] Sample 1 TCP write FAILED
+```
+
+這不代表 `BuildPayload()` 失敗。
+
+它代表 TCP Client 連線已經中斷或 TCP 傳送發生錯誤。
+
+例如使用：
+
+```powershell
+Test-NetConnection 192.168.137.10 -Port 8888
+```
+
+只能測試 TCP Port 是否可以連線。
+
+它不是持續接收 Status Stream 的 Client。
+
+因此可能看到：
+
+```text
+[STATUS] Sample 0 BuildPayload OK
+[STATUS] Sample 1 TCP write FAILED
+```
+
+這種情況屬於測試工具連線結束所造成的正常現象。
+
+---
+
+# 8. 最終 Validation 測試方法
+
+本階段最終測試使用 Windows PowerShell 建立一個最小 TCP Client。
+
+STM32 IP：
+
+```text
+192.168.137.10
+```
+
+Status TCP Server：
+
+```text
+Port 8888
+```
+
+在 Windows PowerShell 執行：
+
+```powershell
+$client = New-Object System.Net.Sockets.TcpClient
+$client.Connect("192.168.137.10", 8888)
+
+$stream = $client.GetStream()
+$buffer = New-Object byte[] 1024
+
+while ($true) {
+    $count = $stream.Read($buffer, 0, $buffer.Length)
+
+    if ($count -le 0) {
+        break
+    }
+
+    $text = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $count)
+
+    Write-Host "[RX] $count bytes"
+    Write-Host $text
+}
+```
+
+此測試 Client 的目的非常單純：
+
+```text
+Connect
+   ↓
+保持 TCP Connection
+   ↓
+Receive
+   ↓
+顯示收到的資料
+```
+
+它不是正式的 Status Client。
+
+---
+
+# 9. Windows TCP Client 預期輸出
+
+正常情況下應該看到：
+
+```text
+[RX] 139 bytes
+>0000000340000000199A33334CCC666680009999000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+```
+
+接著：
+
+```text
+[RX] 139 bytes
+>0000000B6000000033334CCC666680009999B33240240000000000004034000000000000403E0000000000003FF000000000000040000000000000004008000000000000
+```
+
+然後：
+
+```text
+[RX] 139 bytes
+>00000013800000004CCC666680009999B332CCCC403400000000000040240000000000004014000000000000400000000000000040100000000000004018000000000000
+```
+
+接著 Sample 3、Sample 4，最後回到 Sample 0。
+
+---
+
+# 10. 最終測試通過條件
+
+本階段判定 PASS 必須同時符合以下條件。
+
+### STM32 端
+
+必須可以持續看到：
+
+```text
+Sample 0
+Sample 1
+Sample 2
+Sample 3
+Sample 4
+Sample 0
+...
+```
+
+而且每一組都出現：
+
+```text
+BuildPayload OK
+```
+
+以及：
+
+```text
+TCP send OK, 139 bytes
+```
+
+---
+
+### Windows 端
+
+必須持續收到：
+
+```text
+[RX] 139 bytes
+```
+
+並且 Payload 依序呈現：
+
+```text
+Sample 0
+    ↓
+Sample 1
+    ↓
+Sample 2
+    ↓
+Sample 3
+    ↓
+Sample 4
+    ↓
+Sample 0
+```
+
+---
+
+# 11. 本階段已驗證的資料流程
+
+本階段完成後，以下流程已經實際驗證：
+
+```text
+status_raw_data_buffers[]
+        │
+        │ 68-byte Raw Data
+        ▼
+StatusTCPServer_BuildPayload()
+        │
+        │ 136-byte ASCII HEX
+        ▼
+status_payload_buffers[]
+        │
+        │
+        │ '>' + 136 HEX + CRLF
+        ▼
+139-byte Status Payload
+        │
+        ▼
+tcp_write()
+        │
+        ▼
+Ethernet TCP
+        │
+        ▼
+Windows TCP Client
+        │
+        ▼
+139-byte Payload
+```
+
+---
+
+# 12. 本階段尚未完成的功能
+
+以下功能**刻意留到下一階段**：
+
+* 10-byte Status Transport Header
+* Magic `0x47 0x53`
+* Version
+* Packet Type
+* Sequence Number
+* Payload Length
+* CRC
+* 151-byte完整 Transport Packet
+* TCP Client 對 151-byte Packet 的解析
+* 正式 200ms Status Stream
+* 正式單一 Raw Buffer / Payload Buffer 架構
+
+因此，本 README 對應的是：
+
+```text
+Validation Version
+```
+
+不是最終 Production Version。
+
+---
+
+# 13. Validation Checkpoint
+
+本階段完成的核心驗證：
+
+```text
+[PASS] 68-byte Raw Data
+[PASS] Raw → ASCII HEX conversion
+[PASS] 139-byte Payload generation
+[PASS] Five Sample validation
+[PASS] Sample 0 → 1 → 2 → 3 → 4 → 0 loop
+[PASS] STM32 TCP Server
+[PASS] TCP transmission
+[PASS] Windows TCP reception
+[PASS] 139-byte Payload reception
+```
+
+本 Checkpoint 可作為後續正式 Status Stream 開發的基準版本。
+
+如果後續 Transport Packet 開發發生問題，可以回到本 Checkpoint，重新確認：
+
+```text
+68-byte Raw Data
+        ↓
+139-byte Payload
+        ↓
+TCP
+        ↓
+PC
+```
+
+是否仍然正常。
+
+這份 README 可以直接放進目前 GitHub checkpoint。
+
+我建議這次 Git commit / checkpoint 的名稱就用：
+
+```text
+Status Stream Validation - 139-byte Payload TCP Test Passed
+```
+
+
