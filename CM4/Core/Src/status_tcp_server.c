@@ -16,6 +16,9 @@ static uint32_t status_last_send_tick = 0U;
 uint8_t status_payload_buffers[STATUS_PAYLOAD_BUFFER_COUNT]
                               [STATUS_ROUTINE_PACKET_SIZE];
 
+static uint8_t status_packet_buffer[STATUS_STREAM_PACKET_SIZE];
+static uint32_t status_sequence = 0U;
+
 static err_t StatusTCPServer_Accept(void *arg,
                                     struct tcp_pcb *newpcb,
                                     err_t err);
@@ -24,6 +27,34 @@ static void StatusTCPServer_Connected(void *arg,
                                       err_t err);
 
 static void StatusTCPServer_CloseClient(void);
+
+
+
+static uint16_t StatusTCPServer_CalculateCRC16(
+    const uint8_t *data,
+    uint32_t length)
+{
+    uint16_t crc = 0xFFFFU;
+
+    for (uint32_t i = 0U; i < length; i++)
+    {
+        crc ^= data[i];
+
+        for (uint32_t bit = 0U; bit < 8U; bit++)
+        {
+            if ((crc & 0x0001U) != 0U)
+            {
+                crc = (uint16_t)((crc >> 1U) ^ 0xA001U);
+            }
+            else
+            {
+                crc >>= 1U;
+            }
+        }
+    }
+
+    return crc;
+}
 
 
 /*
@@ -105,6 +136,66 @@ bool StatusTCPServer_BuildPayload(
     return true;
 }
 
+
+static bool StatusTCPServer_BuildPacket(
+    uint8_t payload_index,
+    uint32_t sequence)
+{
+    uint16_t crc;
+
+    if (payload_index >= STATUS_PAYLOAD_BUFFER_COUNT)
+    {
+        return false;
+    }
+
+    status_packet_buffer[STATUS_STREAM_MAGIC0_OFFSET] =
+        STATUS_STREAM_MAGIC0;
+
+    status_packet_buffer[STATUS_STREAM_MAGIC1_OFFSET] =
+        STATUS_STREAM_MAGIC1;
+
+    status_packet_buffer[STATUS_STREAM_VERSION_OFFSET] =
+        STATUS_STREAM_VERSION;
+
+    status_packet_buffer[STATUS_STREAM_TYPE_OFFSET] =
+        STATUS_STREAM_TYPE_STATUS;
+
+    status_packet_buffer[STATUS_STREAM_SEQUENCE_OFFSET + 0U] =
+        (uint8_t)(sequence & 0xFFU);
+
+    status_packet_buffer[STATUS_STREAM_SEQUENCE_OFFSET + 1U] =
+        (uint8_t)((sequence >> 8U) & 0xFFU);
+
+    status_packet_buffer[STATUS_STREAM_SEQUENCE_OFFSET + 2U] =
+        (uint8_t)((sequence >> 16U) & 0xFFU);
+
+    status_packet_buffer[STATUS_STREAM_SEQUENCE_OFFSET + 3U] =
+        (uint8_t)((sequence >> 24U) & 0xFFU);
+
+    status_packet_buffer[STATUS_STREAM_LENGTH_OFFSET + 0U] =
+        (uint8_t)(STATUS_STREAM_PAYLOAD_SIZE & 0xFFU);
+
+    status_packet_buffer[STATUS_STREAM_LENGTH_OFFSET + 1U] =
+        (uint8_t)((STATUS_STREAM_PAYLOAD_SIZE >> 8U) & 0xFFU);
+
+    memcpy(&status_packet_buffer[STATUS_STREAM_PAYLOAD_OFFSET],
+           status_payload_buffers[payload_index],
+           STATUS_STREAM_PAYLOAD_SIZE);
+
+    crc = StatusTCPServer_CalculateCRC16(
+        status_packet_buffer,
+        STATUS_STREAM_PAYLOAD_OFFSET + STATUS_STREAM_PAYLOAD_SIZE);
+
+    status_packet_buffer[STATUS_STREAM_PACKET_SIZE - 2U] =
+        (uint8_t)(crc & 0xFFU);
+
+    status_packet_buffer[STATUS_STREAM_PACKET_SIZE - 1U] =
+        (uint8_t)((crc >> 8U) & 0xFFU);
+
+    return true;
+}
+
+
 void StatusTCPServer_Init(void)
 {
     err_t err;
@@ -169,6 +260,43 @@ void StatusTCPServer_Process(void)
         }
 
         printf("\r\n");
+
+
+        if (StatusTCPServer_BuildPacket(sample_index,
+                                        status_sequence))
+        {
+            uint16_t packet_crc =
+                (uint16_t)status_packet_buffer[STATUS_STREAM_PACKET_SIZE - 2U] |
+                ((uint16_t)status_packet_buffer[STATUS_STREAM_PACKET_SIZE - 1U] << 8U);
+
+            printf("[STATUS] Packet Build OK\r\n");
+            printf("[STATUS] Packet Length = %u\r\n",
+                STATUS_STREAM_PACKET_SIZE);
+            printf("[STATUS] Sequence = %lu\r\n",
+                (unsigned long)status_sequence);
+            printf("[STATUS] Payload Length = %u\r\n",
+                STATUS_STREAM_PAYLOAD_SIZE);
+            printf("[STATUS] CRC = %04X\r\n",
+                packet_crc);
+
+            printf("[STATUS] Header: ");
+
+            for (uint32_t i = 0U;
+                i < STATUS_STREAM_HEADER_SIZE;
+                i++)
+            {
+                printf("%02X ", status_packet_buffer[i]);
+            }
+
+            printf("\r\n");
+
+            status_sequence++;
+        }
+        else
+        {
+            printf("[STATUS] Packet Build FAILED\r\n");
+        }
+
     }
     else
     {
@@ -176,22 +304,14 @@ void StatusTCPServer_Process(void)
                sample_index);
     }
 
-    sample_index++;
-
-    if (sample_index >= STATUS_SAMPLE_COUNT)
-    {
-        sample_index = 0U;
-    }
-
-
-    if (tcp_sndbuf(status_client_pcb) < STATUS_ROUTINE_PACKET_SIZE)
+    if (tcp_sndbuf(status_client_pcb) < STATUS_STREAM_PACKET_SIZE)
     {
         return;
     }
 
     if (tcp_write(status_client_pcb,
                 status_payload_buffers[sample_index],
-                STATUS_ROUTINE_PACKET_SIZE,
+                STATUS_STREAM_PACKET_SIZE,
                 TCP_WRITE_FLAG_COPY) != ERR_OK)
     {
         printf("[STATUS] Sample %u TCP write FAILED\r\n", sample_index);
@@ -202,7 +322,15 @@ void StatusTCPServer_Process(void)
 
     tcp_output(status_client_pcb);
 
-    printf("[STATUS] Sample %u TCP send OK, %u bytes\r\n", sample_index, STATUS_ROUTINE_PACKET_SIZE);
+    printf("[STATUS] Sample %u TCP send OK, %u bytes\r\n", sample_index, STATUS_STREAM_PACKET_SIZE);
+
+    sample_index++;
+
+    if (sample_index >= STATUS_SAMPLE_COUNT)
+    {
+        sample_index = 0U;
+    }
+
 }
 
 static err_t StatusTCPServer_Accept(void *arg,
