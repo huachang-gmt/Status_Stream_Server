@@ -23,8 +23,8 @@ static err_t StatusTCPServer_Accept(void *arg,
                                     struct tcp_pcb *newpcb,
                                     err_t err);
 
-static void StatusTCPServer_Connected(void *arg,
-                                      err_t err);
+static void StatusTCPServer_Error(void *arg,
+                                  err_t err);
 
 static void StatusTCPServer_CloseClient(void);
 
@@ -57,39 +57,6 @@ static uint16_t StatusTCPServer_CalculateCRC16(
 }
 
 
-/*
- * ============================================================
- * Routine Status Payload Builder
- * ============================================================
- *
- * Validation version:
- *
- *   status_sample.h provides five simulated 68-byte raw
- *   status data sets. Each sample is converted into its own
- *   139-byte payload buffer for Status Stream validation.
- *
- *   Sample 0 -> status_payload_buffers[0][139]
- *   Sample 1 -> status_payload_buffers[1][139]
- *   Sample 2 -> status_payload_buffers[2][139]
- *   Sample 3 -> status_payload_buffers[3][139]
- *   Sample 4 -> status_payload_buffers[4][139]
- *
- * The five samples are used only for validation so the PC
- * Client can clearly display changing status values.
- *
- * After validation, status_sample.h will be removed.
- * The production version will use one 68-byte raw data
- * buffer and one 139-byte payload buffer.
- *
- * Payload format:
- *
- *   '>' + 136 ASCII HEX characters + "\r\n"
- *
- * The API currently supports:
- *
- *   STATUS_DATA_RAW_68
- *   STATUS_DATA_HEX_136
- */
 bool StatusTCPServer_BuildPayload(
     uint8_t index,
     StatusDataType type,
@@ -249,46 +216,9 @@ void StatusTCPServer_Process(void)
                                      STATUS_DATA_RAW_68,
                                      status_raw_data_buffers[sample_index]))
     {
-        printf("[STATUS] Sample %u BuildPayload OK\r\n",
-               sample_index);
-
-        printf("[STATUS] Payload[0..20]: ");
-
-        for (uint32_t i = 0U; i <= 20U; i++)
-        {
-            printf("%c", status_payload_buffers[sample_index][i]);
-        }
-
-        printf("\r\n");
-
-
         if (StatusTCPServer_BuildPacket(sample_index,
                                         status_sequence))
-        {
-            uint16_t packet_crc =
-                (uint16_t)status_packet_buffer[STATUS_STREAM_PACKET_SIZE - 2U] |
-                ((uint16_t)status_packet_buffer[STATUS_STREAM_PACKET_SIZE - 1U] << 8U);
-
-            printf("[STATUS] Packet Build OK\r\n");
-            printf("[STATUS] Packet Length = %u\r\n",
-                STATUS_STREAM_PACKET_SIZE);
-            printf("[STATUS] Sequence = %lu\r\n",
-                (unsigned long)status_sequence);
-            printf("[STATUS] Payload Length = %u\r\n",
-                STATUS_STREAM_PAYLOAD_SIZE);
-            printf("[STATUS] CRC = %04X\r\n",
-                packet_crc);
-
-            printf("[STATUS] Header: ");
-
-            for (uint32_t i = 0U;
-                i < STATUS_STREAM_HEADER_SIZE;
-                i++)
-            {
-                printf("%02X ", status_packet_buffer[i]);
-            }
-
-            printf("\r\n");
+        {     
 
             status_sequence++;
         }
@@ -304,19 +234,34 @@ void StatusTCPServer_Process(void)
                sample_index);
     }
 
+    /*   如果在 STM32H755 開發板端的網路線被拔除或是斷線，關閉以下程式，可以讓 Status stream 資料繼續傳送
+            不會停止
     if (tcp_sndbuf(status_client_pcb) < STATUS_STREAM_PACKET_SIZE)
     {
         return;
     }
+    */
 
-    if (tcp_write(status_client_pcb,
-                status_payload_buffers[sample_index],
-                STATUS_STREAM_PACKET_SIZE,
-                TCP_WRITE_FLAG_COPY) != ERR_OK)
+    err_t write_err;
+
+    write_err = tcp_write(status_client_pcb,
+                          status_packet_buffer,
+                          STATUS_STREAM_PACKET_SIZE,
+                          TCP_WRITE_FLAG_COPY);
+
+    if (write_err != ERR_OK)
     {
-        printf("[STATUS] Sample %u TCP write FAILED\r\n", sample_index);
+        printf("[STATUS] Sample %u TCP write FAILED, err=%d, sndbuf=%u, sndqueuelen=%u\r\n",
+            sample_index,
+            (int)write_err,
+            tcp_sndbuf(status_client_pcb),
+            tcp_sndqueuelen(status_client_pcb));
 
-        StatusTCPServer_CloseClient();
+        if (write_err == ERR_MEM)
+        {
+            StatusTCPServer_CloseClient();
+        }
+        
         return;
     }
 
@@ -344,8 +289,7 @@ static err_t StatusTCPServer_Accept(void *arg,
 
     if (status_client_pcb != NULL)
     {
-        tcp_abort(newpcb);
-        return ERR_ABRT;
+        StatusTCPServer_CloseClient();
     }
 
     status_client_pcb = newpcb;
@@ -353,20 +297,22 @@ static err_t StatusTCPServer_Accept(void *arg,
     status_last_send_tick = HAL_GetTick();
 
     tcp_arg(newpcb, NULL);
-    tcp_err(newpcb, StatusTCPServer_Connected);
+    tcp_err(newpcb, StatusTCPServer_Error);
 
     return ERR_OK;
 }
 
-static void StatusTCPServer_Connected(void *arg,
-                                      err_t err)
-{
+static void StatusTCPServer_Error(void *arg,
+                                  err_t err)
+{  
     status_client_pcb = NULL;
 }
 
 static void StatusTCPServer_CloseClient(void)
 {
-    struct tcp_pcb *pcb = status_client_pcb;
+    struct tcp_pcb *pcb;
+
+    pcb = status_client_pcb;
 
     status_client_pcb = NULL;
 
@@ -375,5 +321,5 @@ static void StatusTCPServer_CloseClient(void)
         return;
     }
 
-    tcp_close(pcb);
+    tcp_abort(pcb);
 }
